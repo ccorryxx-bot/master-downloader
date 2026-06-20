@@ -1,0 +1,92 @@
+name: Downloader WF1
+on:
+  workflow_dispatch:
+    inputs:
+      media_link:
+        description: 'Media link (Telegram or URL)'
+        required: true
+      target_chat_id:
+        description: 'Telegram Chat ID for progress'
+        required: true
+      quality:
+        description: 'Video quality (360/480/720)'
+        required: true
+        default: '720'
+      task_id:
+        description: 'Task ID for chaining'
+        required: false
+        default: ''
+      chain_to_channel:
+        description: 'Auto-dispatch channel manager after download'
+        required: false
+        default: 'false'
+      channel_id:
+        description: 'Target Telegram Channel ID'
+        required: false
+        default: ''
+      caption_config:
+        description: 'Caption config JSON'
+        required: false
+        default: '{}'
+      wf_index:
+        description: 'Workflow slot index'
+        required: false
+        default: '1'
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install FFmpeg
+        timeout-minutes: 3
+        run: |
+          wget -q "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz" -O /tmp/ffmpeg.tar.xz
+          tar -xf /tmp/ffmpeg.tar.xz -C /tmp/
+          sudo mv /tmp/ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/ffmpeg
+          sudo mv /tmp/ffmpeg-master-latest-linux64-gpl/bin/ffprobe /usr/local/bin/ffprobe
+          sudo chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe
+
+      - name: Install yt-dlp
+        run: |
+          sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
+          sudo chmod a+rx /usr/local/bin/yt-dlp
+
+      - name: Install Python dependencies
+        run: pip install telethon hachoir aiohttp requests boto3
+
+      - name: Run processor
+        timeout-minutes: 110
+        env:
+          API_ID: ${{ secrets.TG_API_ID }}
+          API_HASH: ${{ secrets.TG_API_HASH }}
+          STRING_SESSION_1: ${{ secrets.TG_STRING_SESSION }}
+          BOT_TOKEN: ${{ secrets.MASTER_BOT_TOKEN }}
+          E2_ACCESS_KEY_ID: ${{ secrets.E2_ACCESS_KEY_ID }}
+          E2_SECRET_ACCESS_KEY: ${{ secrets.E2_SECRET_ACCESS_KEY }}
+          E2_ENDPOINT: ${{ secrets.E2_ENDPOINT }}
+          E2_BUCKET_NAME: ${{ secrets.E2_BUCKET_NAME }}
+          E2_REGION: ${{ secrets.E2_REGION }}
+          CF_AUTH_EMAIL: ${{ secrets.CF_AUTH_EMAIL }}
+          CF_AUTH_KEY: ${{ secrets.CF_GLOBAL_KEY }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_KV_NAMESPACE_ID: ${{ secrets.CF_KV_NAMESPACE_ID }}
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          CHANNEL_MANAGER_REPO: ccorryxx-bot/master-channel-manager
+          MEDIA_LINK: ${{ github.event.inputs.media_link }}
+          TARGET_CHAT_ID: ${{ github.event.inputs.target_chat_id }}
+          QUALITY: ${{ github.event.inputs.quality }}
+          TASK_ID: ${{ github.event.inputs.task_id }}
+          CHAIN_TO_CHANNEL: ${{ github.event.inputs.chain_to_channel }}
+          CHANNEL_ID: ${{ github.event.inputs.channel_id }}
+          CAPTION_CONFIG: ${{ github.event.inputs.caption_config }}
+          WF_INDEX: ${{ github.event.inputs.wf_index }}
+        run: python processor.py
