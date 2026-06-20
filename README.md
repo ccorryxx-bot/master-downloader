@@ -1,2 +1,5 @@
-# master-downloader
-Master Bot — Downloader &amp; IDrive e2 uploader (replaces P1)
+# Master Downloader
+
+Downloads media (Telegram/URLs) and uploads to IDrive e2. Triggered by Master CF Worker via `workflow_dispatch`.
+
+**Do not trigger manually.** Use the Master Bot instead.
