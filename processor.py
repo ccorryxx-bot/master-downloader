@@ -27,6 +27,8 @@ CF_ACCOUNT_ID      = os.environ.get("CF_ACCOUNT_ID", "")
 CF_KV_NAMESPACE_ID = os.environ.get("CF_KV_NAMESPACE_ID", "")
 GITHUB_TOKEN       = os.environ.get("GITHUB_TOKEN", "")
 WORKER_URL         = os.environ.get("WORKER_URL", "")
+SUPABASE_URL       = "https://guotpdwaswaybjiiezax.supabase.co"
+SUPABASE_KEY       = os.environ.get("SUPABASE_KEY", "")
 
 # ── S3 Client ─────────────────────────────────────────────────────────────────
 def get_s3():
@@ -38,6 +40,44 @@ def get_s3():
         region_name=E2_REGION,
         config=Config(signature_version="s3v4", retries={"max_attempts": 3}),
     )
+
+# ── Supabase Helpers ──────────────────────────────────────────────────────────
+def sb_headers():
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal"
+    }
+
+def sb_update_task(task_id, status, error_msg=None):
+    if not SUPABASE_KEY:
+        return
+    try:
+        body = {"status": status}
+        if status in ("completed", "failed"):
+            body["end_time"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        if error_msg:
+            body["error_message"] = error_msg[:500]
+        requests.patch(
+            f"{SUPABASE_URL}/rest/v1/tasks?task_id=eq.{task_id}",
+            headers=sb_headers(), json=body, timeout=10
+        )
+    except Exception as e:
+        print(f"[WARN] sb_update_task: {e}")
+
+def sb_log(task_id, level, message):
+    if not SUPABASE_KEY or not task_id:
+        return
+    try:
+        requests.post(
+            f"{SUPABASE_URL}/rest/v1/task_logs",
+            headers=sb_headers(),
+            json={"task_id": task_id, "level": level, "message": message[:500]},
+            timeout=10
+        )
+    except Exception as e:
+        print(f"[WARN] sb_log: {e}")
 
 # ── Telegram Bot API ───────────────────────────────────────────────────────────
 def send_tg(method, payload, retries=3):
@@ -117,10 +157,11 @@ async def get_kv_tasks():
 
 # ── Progress Reporter ─────────────────────────────────────────────────────────
 class Progress:
-    def __init__(self, chat_id, msg_id, filename="..."):
+    def __init__(self, chat_id, msg_id, filename="...", task_id=""):
         self.chat_id = chat_id
         self.msg_id = msg_id
         self.filename = filename
+        self.task_id = task_id
         self.last_update = 0
         self.start = time.time()
 
@@ -137,12 +178,15 @@ class Progress:
         elapsed = now - self.start
         speed = current / elapsed if elapsed > 0 else 0
         eta = time.strftime("%M:%S", time.gmtime((total - current) / speed)) if speed > 0 else "--:--"
-        edit_msg(self.chat_id, self.msg_id,
+        text = (
             f"⏳ *{action}*\n"
             f"📄 `{self.filename}`\n"
             f"`[{self.bar(pct)}] {pct:.1f}%`\n"
             f"⏱️ ETA: `{eta}`"
         )
+        edit_msg(self.chat_id, self.msg_id, text)
+        if self.task_id:
+            sb_log(self.task_id, "info", f"{action} {pct:.1f}% — ETA {eta}")
 
 # ── Dispatch Channel Manager ──────────────────────────────────────────────────
 def dispatch_channel_manager(payload, wf_index=1):
@@ -274,7 +318,11 @@ async def process_task(client, task):
 
     file_prefix = f"dl_{int(time.time())}_{hashlib.md5(media_link.encode()).hexdigest()[:6]}"
     file_path = None
-    reporter = Progress(chat_id, msg_id, "Extracting info...")
+    reporter = Progress(chat_id, msg_id, "Extracting info...", task_id)
+
+    # Mark task as running in Supabase
+    sb_update_task(task_id, "running")
+    sb_log(task_id, "info", f"Task started — mediaLink: {media_link[:80]}")
 
     try:
         # ── Download ──────────────────────────────────────────────────────────
@@ -294,7 +342,6 @@ async def process_task(client, task):
                 progress_callback=lambda c, t: reporter.update(c, t)
             )
         else:
-            # yt-dlp for external URLs
             q_format = {"360": "bestvideo[height<=360]+bestaudio/best[height<=360]",
                         "480": "bestvideo[height<=480]+bestaudio/best[height<=480]",
                         "720": "bestvideo[height<=720]+bestaudio/best[height<=720]"}.get(quality, "bestvideo+bestaudio/best")
@@ -318,6 +365,8 @@ async def process_task(client, task):
         file_size_mb = os.path.getsize(file_path) / 1024 / 1024
         object_key = os.path.basename(file_path)
 
+        sb_log(task_id, "info", f"Downloaded — {file_size_mb:.1f} MB")
+
         # ── Upload to IDrive e2 ───────────────────────────────────────────────
         edit_msg(chat_id, msg_id, f"📤 *Uploading to e2...*\n📄 `{reporter.filename}`\n💾 `{file_size_mb:.1f} MB`")
         s3 = get_s3()
@@ -330,14 +379,15 @@ async def process_task(client, task):
             tc = TransferConfig(multipart_threshold=5*1024**3, multipart_chunksize=100*1024*1024)
             s3.upload_file(file_path, E2_BUCKET_NAME, object_key, Config=tc)
 
-        # Presigned URL (7 days)
         url = s3.generate_presigned_url(
             "get_object",
             Params={"Bucket": E2_BUCKET_NAME, "Key": object_key},
             ExpiresIn=604800
         )
 
-        # Store result in KV for status tracking
+        sb_log(task_id, "info", f"Uploaded to e2 — {object_key}")
+
+        # Store result in KV
         if task_id:
             kv_put(f"result:{task_id}", json.dumps({
                 "url": url, "filename": reporter.filename,
@@ -365,6 +415,9 @@ async def process_task(client, task):
                     f"🔗 [Direct Link]({url})\n\n"
                     f"⚠️ Channel manager dispatch မအောင်မြင် — link ကိုသာ သုံးပါ"
                 )
+            else:
+                # Task continues in channel manager — mark as "chained"
+                sb_log(task_id, "info", f"Chained to channel manager (WF{wf_index})")
         else:
             edit_msg(chat_id, msg_id,
                 f"✅ *Download Complete!*\n\n"
@@ -373,10 +426,14 @@ async def process_task(client, task):
                 f"🔗 [Direct Link]({url})\n\n"
                 f"⏰ Link ၇ ရက် valid"
             )
+            sb_update_task(task_id, "completed")
+            sb_log(task_id, "info", "Download complete — link sent to user")
 
     except Exception as e:
         print(f"[ERROR] Task error: {e}")
         edit_msg(chat_id, msg_id, f"❌ *Download Failed*\n\n`{str(e)[:300]}`")
+        sb_update_task(task_id, "failed", str(e)[:300])
+        sb_log(task_id, "error", f"Task failed: {str(e)[:300]}")
     finally:
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
@@ -396,7 +453,7 @@ async def main():
 
     client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
     await client.connect()
-    print("[INFO] Master Downloader started. Polling CF KV...")
+    print("[INFO] Master Downloader v2 started. Polling CF KV (task: + cmd: prefix)...")
 
     empty_polls = 0
     while empty_polls < 12:
