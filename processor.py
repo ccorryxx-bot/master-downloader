@@ -26,7 +26,7 @@ CF_AUTH_KEY        = os.environ.get("CF_AUTH_KEY", "")
 CF_ACCOUNT_ID      = os.environ.get("CF_ACCOUNT_ID", "")
 CF_KV_NAMESPACE_ID = os.environ.get("CF_KV_NAMESPACE_ID", "")
 GITHUB_TOKEN       = os.environ.get("GITHUB_TOKEN", "")
-WORKER_URL         = os.environ.get("WORKER_URL", "")
+WORKER_URL         = os.environ.get("WORKER_URL", "").rstrip("/")
 SUPABASE_URL       = "https://guotpdwaswaybjiiezax.supabase.co"
 SUPABASE_KEY       = os.environ.get("SUPABASE_KEY", "")
 
@@ -179,14 +179,14 @@ class Progress:
         speed = current / elapsed if elapsed > 0 else 0
         eta = time.strftime("%M:%S", time.gmtime((total - current) / speed)) if speed > 0 else "--:--"
         text = (
-            f"⏳ *{action}*\n"
+            f"⏳ *Downloading*\n"
             f"📄 `{self.filename}`\n"
             f"`[{self.bar(pct)}] {pct:.1f}%`\n"
             f"⏱️ ETA: `{eta}`"
         )
         edit_msg(self.chat_id, self.msg_id, text)
         if self.task_id:
-            sb_log(self.task_id, "info", f"{action} {pct:.1f}% — ETA {eta}")
+            sb_log(self.task_id, "info", f"Downloading {pct:.1f}% — ETA {eta}")
 
 # ── Dispatch Channel Manager ──────────────────────────────────────────────────
 def dispatch_channel_manager(payload, wf_index=1):
@@ -320,7 +320,6 @@ async def process_task(client, task):
     file_path = None
     reporter = Progress(chat_id, msg_id, "Extracting info...", task_id)
 
-    # Mark task as running in Supabase
     sb_update_task(task_id, "running")
     sb_log(task_id, "info", f"Task started — mediaLink: {media_link[:80]}")
 
@@ -387,7 +386,6 @@ async def process_task(client, task):
 
         sb_log(task_id, "info", f"Uploaded to e2 — {object_key}")
 
-        # Store result in KV
         if task_id:
             kv_put(f"result:{task_id}", json.dumps({
                 "url": url, "filename": reporter.filename,
@@ -410,14 +408,18 @@ async def process_task(client, task):
             }
             dispatched = dispatch_channel_manager(payload, wf_index)
             if not dispatched:
+                # FIX Bug 4: dispatch fail → mark task as failed, not stuck in running
+                sb_update_task(task_id, "failed", "Channel manager dispatch failed")
+                sb_log(task_id, "error", f"Channel manager dispatch failed (WF{wf_index})")
                 edit_msg(chat_id, msg_id,
                     f"✅ *Downloaded!*\n📄 `{reporter.filename}`\n💾 `{file_size_mb:.1f} MB`\n\n"
                     f"🔗 [Direct Link]({url})\n\n"
                     f"⚠️ Channel manager dispatch မအောင်မြင် — link ကိုသာ သုံးပါ"
                 )
             else:
-                # Task continues in channel manager — mark as "chained"
-                sb_log(task_id, "info", f"Chained to channel manager (WF{wf_index})")
+                # FIX Bug 4: dispatch success → log clearly that chain is running
+                # Status stays "running" — channel manager will update to completed/failed
+                sb_log(task_id, "info", f"Chained to channel manager (WF{wf_index}) — channel manager processing")
         else:
             edit_msg(chat_id, msg_id,
                 f"✅ *Download Complete!*\n\n"
@@ -453,7 +455,7 @@ async def main():
 
     client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
     await client.connect()
-    print("[INFO] Master Downloader v2 started. Polling CF KV (task: + cmd: prefix)...")
+    print("[INFO] Master Downloader started. Polling CF KV (task: + cmd: prefix)...")
 
     empty_polls = 0
     while empty_polls < 12:
