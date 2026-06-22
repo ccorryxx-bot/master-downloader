@@ -78,7 +78,9 @@ def send_progress(text):
     sb_log("error" if "❌" in text else "info", text[:400])
     if TARGET_CHAT_ID and WORKER_URL:
         try:
-            requests.post(f"{WORKER_URL}/progress",
+            base = WORKER_URL.rstrip("/")
+            url  = base if base.endswith("/progress") else base + "/progress"
+            requests.post(url,
                           json={"chat_id": TARGET_CHAT_ID, "progress_text": msg, "task_id": TASK_ID},
                           timeout=10)
         except Exception as e:
