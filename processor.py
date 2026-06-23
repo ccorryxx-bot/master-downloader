@@ -87,24 +87,58 @@ def send_progress(text):
             print(f"[WARN] progress push: {e}")
 
 # ── Storage Check ─────────────────────────────────────────────────────────────
+def _make_s3():
+    return boto3.client("s3", endpoint_url=E2_ENDPOINT,
+                        aws_access_key_id=E2_ACCESS_KEY_ID,
+                        aws_secret_access_key=E2_SECRET_ACCESS_KEY,
+                        region_name=E2_REGION,
+                        config=Config(signature_version="s3v4"))
+
 def handle_storage_check():
     send_progress("🗄 IDrive e2 storage စစ်ဆေးနေသည်...")
     try:
-        s3 = boto3.client("s3", endpoint_url=E2_ENDPOINT,
-                          aws_access_key_id=E2_ACCESS_KEY_ID,
-                          aws_secret_access_key=E2_SECRET_ACCESS_KEY,
-                          region_name=E2_REGION,
-                          config=Config(signature_version="s3v4"))
+        s3 = _make_s3()
         objects = s3.list_objects_v2(Bucket=E2_BUCKET_NAME)
         files = objects.get("Contents", [])
         total_mb = sum(f["Size"] for f in files) / 1024 / 1024
+        sorted_files = sorted(files, key=lambda x: x["LastModified"], reverse=True)[:15]
         lines = [f"🗄 *IDrive e2 Storage*\n\n📦 {len(files)} files | {total_mb:.1f} MB\n"]
-        for f in sorted(files, key=lambda x: x["LastModified"], reverse=True)[:10]:
+        for f in sorted_files:
             sz = f["Size"] / 1024 / 1024
-            lines.append(f"• `{f['Key'][:45]}` ({sz:.1f} MB)")
+            lines.append(f"• `{f['Key'][:50]}` ({sz:.1f} MB)")
+        lines.append("\n_💡 /del filename.mp4 — ဖျက်ရန် | /delall — အားလုံးဖျက်_")
         send_progress("\n".join(lines))
+        # Send structured filelist JSON so worker can save to KV and render delete buttons
+        file_data = [{"key": f["Key"], "size_mb": round(f["Size"]/1024/1024, 1)}
+                     for f in sorted_files]
+        send_progress(f"__FILELIST__:{json.dumps({'files': file_data, 'total_mb': round(total_mb, 1)})}")
     except Exception as e:
         send_progress(f"❌ Storage error: {e}")
+
+# ── Storage Delete ─────────────────────────────────────────────────────────────
+def handle_storage_delete(file_key):
+    send_progress(f"🗑 Deleting: `{file_key}`...")
+    try:
+        s3 = _make_s3()
+        s3.delete_object(Bucket=E2_BUCKET_NAME, Key=file_key)
+        send_progress(f"🎉 Deleted: `{file_key}`")
+    except Exception as e:
+        send_progress(f"❌ Delete failed: {e}")
+
+def handle_storage_delete_all():
+    send_progress("🗑 Deleting all files...")
+    try:
+        s3 = _make_s3()
+        objects = s3.list_objects_v2(Bucket=E2_BUCKET_NAME)
+        files = objects.get("Contents", [])
+        if not files:
+            send_progress("📭 Storage empty — ဖျက်ရမည့် file မရှိပါ")
+            return
+        for f in files:
+            s3.delete_object(Bucket=E2_BUCKET_NAME, Key=f["Key"])
+        send_progress(f"🎉 Deleted {len(files)} files — Storage ကို ရှင်းလင်းပြီ")
+    except Exception as e:
+        send_progress(f"❌ Delete all failed: {e}")
 
 # ── Telegram Link Parser ──────────────────────────────────────────────────────
 def parse_tg_link(link):
@@ -187,9 +221,16 @@ def chain_to_channel_manager(video_url):
 async def main():
     import traceback
 
-    # Special mode: storage check
+    # Special modes: storage operations
     if MEDIA_LINK == "storage_check":
         handle_storage_check()
+        return
+    if MEDIA_LINK.startswith("storage_delete:"):
+        file_key = MEDIA_LINK[len("storage_delete:"):]
+        handle_storage_delete(file_key)
+        return
+    if MEDIA_LINK == "storage_delete_all":
+        handle_storage_delete_all()
         return
 
     # Preflight
